@@ -110,14 +110,12 @@ seq = load_last_sequence(folder)
 frames = []
 input_seq = torch.tensor(seq).float().unsqueeze(0).unsqueeze(2).to(DEVICE)
 
-h_t, c_t = None, None
-
 # -----------------------
 # Predict future frames
 # -----------------------
 for step in range(PREDICT_STEPS):
     with torch.no_grad():
-        pred, h_t, c_t = model(input_seq, h_t, c_t)
+        pred, _, _ = model(input_seq)
 
     frame = pred.cpu().squeeze().numpy()
     frames.append((frame * 255).astype(np.uint8))

@@ -2,3 +2,4 @@
 /.venv
 /best_model.pth
 /images
+/forecast/
