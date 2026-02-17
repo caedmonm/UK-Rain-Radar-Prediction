@@ -91,6 +91,24 @@ def load_last_sequence(folder):
 
     return np.array(imgs)
 
+
+def frame_to_uint8(frame):
+    frame = np.clip(frame, 0.0, 1.0).astype(np.float32)
+    raw = (frame * 255.0).astype(np.uint8)
+
+    # Stretch low-contrast predictions so saved PNGs are visually inspectable.
+    lo = float(np.percentile(frame, 1))
+    hi = float(np.percentile(frame, 99))
+
+    if hi > lo + 1e-6:
+        vis = np.clip((frame - lo) / (hi - lo), 0.0, 1.0)
+    else:
+        max_val = float(frame.max())
+        vis = (frame / max_val) if max_val > 1e-6 else np.zeros_like(frame)
+
+    vis = (vis * 255.0).astype(np.uint8)
+    return raw, vis
+
 # -----------------------
 # Load model
 # -----------------------
@@ -109,20 +127,26 @@ seq = load_last_sequence(folder)
 
 frames = []
 input_seq = torch.tensor(seq).float().unsqueeze(0).unsqueeze(2).to(DEVICE)
+raw_frames = []
+h_t, c_t = None, None
 
 # -----------------------
 # Predict future frames
 # -----------------------
 for step in range(PREDICT_STEPS):
     with torch.no_grad():
-        pred, _, _ = model(input_seq)
+        if step == 0:
+            pred, h_t, c_t = model(input_seq, h_t, c_t)
+        else:
+            pred, h_t, c_t = model(new_frame, h_t, c_t)
 
     frame = pred.cpu().squeeze().numpy()
-    frames.append((frame * 255).astype(np.uint8))
+    raw, vis = frame_to_uint8(frame)
+    raw_frames.append(raw)
+    frames.append(vis)
 
     # feed prediction back in
     new_frame = pred.unsqueeze(1)
-    input_seq = torch.cat([input_seq[:, 1:], new_frame], dim=1)
 
     print(f"Predicted future frame {step+1}/{PREDICT_STEPS}")
 
@@ -130,11 +154,14 @@ for step in range(PREDICT_STEPS):
 # Save frames
 # -----------------------
 os.makedirs("forecast", exist_ok=True)
+os.makedirs("forecast/raw", exist_ok=True)
 
 for i, f in enumerate(frames):
     Image.fromarray(f).save(f"forecast/frame_{i:02d}.png")
+    Image.fromarray(raw_frames[i]).save(f"forecast/raw/frame_{i:02d}.png")
 
-print("Saved forecast frames to ./forecast")
+print("Saved visualization frames to ./forecast")
+print("Saved raw frames to ./forecast/raw")
 
 # -----------------------
 # Create GIF animation

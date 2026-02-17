@@ -3,12 +3,15 @@ import torch
 import torch.nn as nn
 import numpy as np
 from PIL import Image
+from torch.utils.data import DataLoader, TensorDataset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", DEVICE)
 
 SEQ_LEN = 6
 IMG_SIZE = 128
+BATCH_SIZE = 4
+
 
 # -----------------------
 # Load one folder sequence
@@ -35,6 +38,7 @@ def load_folder_sequence(folder):
 
     return np.array(imgs)
 
+
 # -----------------------
 # Load all folders safely
 # -----------------------
@@ -58,13 +62,14 @@ def load_all_sequences(base="./images"):
 
         # create sequences ONLY within folder
         for i in range(len(images) - SEQ_LEN):
-            seq = images[i:i+SEQ_LEN]
-            target = images[i+SEQ_LEN]
+            seq = images[i : i + SEQ_LEN]
+            target = images[i + SEQ_LEN]
 
             all_X.append(seq)
             all_Y.append(target)
 
     return np.array(all_X), np.array(all_Y)
+
 
 X, Y = load_all_sequences()
 
@@ -72,6 +77,7 @@ print("Total training samples:", len(X))
 
 X = torch.tensor(X).float().unsqueeze(2)
 Y = torch.tensor(Y).float().unsqueeze(1)
+
 
 # -----------------------
 # ConvLSTM
@@ -100,6 +106,7 @@ class ConvLSTMCell(nn.Module):
         h_next = o * torch.tanh(c_next)
         return h_next, c_next
 
+
 class RadarPredictor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -108,14 +115,15 @@ class RadarPredictor(nn.Module):
 
     def forward(self, x):
         b, t, c, h, w = x.shape
-        h_t = torch.zeros(b, 32, h, w).to(DEVICE)
-        c_t = torch.zeros(b, 32, h, w).to(DEVICE)
+        h_t = torch.zeros(b, 32, h, w, device=x.device)
+        c_t = torch.zeros(b, 32, h, w, device=x.device)
 
         for i in range(t):
             h_t, c_t = self.lstm(x[:, i], h_t, c_t)
 
         out = self.conv_out(h_t)
         return torch.sigmoid(out)
+
 
 model = RadarPredictor().to(DEVICE)
 
@@ -126,9 +134,15 @@ if os.path.exists("best_model.pth"):
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 loss_fn = nn.MSELoss()
+scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE == "cuda"))
 
-X = X.to(DEVICE)
-Y = Y.to(DEVICE)
+dataset = TensorDataset(X, Y)
+train_loader = DataLoader(
+    dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    pin_memory=(DEVICE == "cuda"),
+)
 
 # -----------------------
 # Train
@@ -137,16 +151,29 @@ best_loss = float("inf")
 EPOCHS = 10
 
 for epoch in range(EPOCHS):
-    optimizer.zero_grad()
-    pred = model(X)
-    loss = loss_fn(pred, Y)
-    loss.backward()
-    optimizer.step()
+    model.train()
+    running_loss = 0.0
 
-    loss_val = loss.item()
-    print(f"Epoch {epoch+1}/{EPOCHS} loss:", loss_val)
+    for X_batch, Y_batch in train_loader:
+        X_batch = X_batch.to(DEVICE, non_blocking=True)
+        Y_batch = Y_batch.to(DEVICE, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        with torch.amp.autocast("cuda", enabled=(DEVICE == "cuda")):
+            pred = model(X_batch)
+            loss = loss_fn(pred, Y_batch)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        running_loss += loss.item()
+
+    loss_val = running_loss / max(1, len(train_loader))
+    print(f"Epoch {epoch + 1}/{EPOCHS} loss: {loss_val:.6f}")
 
     if loss_val < best_loss:
         best_loss = loss_val
         torch.save(model.state_dict(), "best_model.pth")
-        print("💾 Saved best model")
+        print("Saved best model")
